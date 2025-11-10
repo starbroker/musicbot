@@ -13,10 +13,12 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 SONG_QUEUES = {}
 AUTOPLAY_ENABLED = {}
 LAST_VIDEO_ID = {}
+YTDLP_SEMAPHORE = asyncio.Semaphore(1)
 
 async def search_ytdlp_async(query, ydl_opts):
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, lambda: _extract(query, ydl_opts))
+    async with YTDLP_SEMAPHORE:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: _extract(query, ydl_opts))
 
 def _extract(query, ydl_opts):
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:

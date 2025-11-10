@@ -2,15 +2,17 @@ import os
 import asyncio
 import threading
 from collections import deque
+import subprocess
+import sys
 
 # Install dependencies if missing
 try:
     import discord
     from discord import app_commands
     from discord.ext import commands
+    print("✅ discord.py imported successfully")
 except ImportError:
-    import subprocess
-    import sys
+    print("📦 Installing discord.py...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "discord.py==2.3.2"])
     import discord
     from discord import app_commands
@@ -18,26 +20,32 @@ except ImportError:
 
 try:
     import yt_dlp
+    print("✅ yt-dlp imported successfully")
 except ImportError:
-    import subprocess
-    import sys
+    print("📦 Installing yt-dlp...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "yt-dlp==2023.11.16"])
     import yt_dlp
 
-from flask import Flask
+# Simple Flask keep-alive
+try:
+    from flask import Flask
+    app = Flask(__name__)
+    
+    @app.route('/')
+    def home():
+        return "🎵 Music Bot Online"
+    
+    @app.route('/health')
+    def health():
+        return "OK"
+    
+    def run_flask():
+        app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
+        
+except ImportError:
+    print("❌ Flask not available, running without web server")
 
-# Flask app for keep-alive
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "🎵 Discord Music Bot is running!"
-
-@app.route('/health')
-def health():
-    return "OK"
-
-# YT-DLP configuration
+# YouTube DL configuration
 ytdl_format_options = {
     'format': 'bestaudio/best',
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
@@ -52,8 +60,8 @@ ytdl_format_options = {
 }
 
 ffmpeg_options = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin',
-    'options': '-vn -filter:a "volume=0.8"'
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn'
 }
 
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
@@ -62,11 +70,11 @@ class MusicSource:
     def __init__(self, data, source):
         self.data = data
         self.source = source
-        self.title = data.get('title')
-        self.url = data.get('url')
-        self.duration = data.get('duration')
-        self.thumbnail = data.get('thumbnail')
-        self.uploader = data.get('uploader')
+        self.title = data.get('title', 'Unknown Title')
+        self.url = data.get('url', '')
+        self.duration = data.get('duration', 0)
+        self.thumbnail = data.get('thumbnail', '')
+        self.uploader = data.get('uploader', 'Unknown')
 
     @classmethod
     async def from_url(cls, url, *, loop=None):
@@ -75,29 +83,33 @@ class MusicSource:
         def extract_info():
             return ytdl.extract_info(url, download=False)
         
-        data = await loop.run_in_executor(None, extract_info)
-        
-        if 'entries' in data:
-            data = data['entries'][0]
-        
-        # Get the audio URL
-        audio_url = data['url']
-        
-        # Create FFmpeg source
-        source = discord.FFmpegPCMAudio(
-            audio_url,
-            **ffmpeg_options
-        )
-        
-        # Apply volume
-        source = discord.PCMVolumeTransformer(source, volume=0.5)
-        
-        return cls(data, source)
+        try:
+            data = await loop.run_in_executor(None, extract_info)
+            
+            if 'entries' in data:
+                data = data['entries'][0]
+            
+            # Get the audio URL
+            audio_url = data['url']
+            
+            # Create FFmpeg audio source directly
+            source = discord.FFmpegPCMAudio(
+                audio_url,
+                **ffmpeg_options
+            )
+            
+            # Apply volume
+            source = discord.PCMVolumeTransformer(source, volume=0.7)
+            
+            return cls(data, source)
+        except Exception as e:
+            print(f"Error creating music source: {e}")
+            raise e
 
 class MusicQueue:
     def __init__(self):
         self._queue = deque()
-        self.history = deque(maxlen=20)
+        self.history = deque(maxlen=10)
         self.loop = False
         self.loop_queue = False
     
@@ -120,7 +132,9 @@ class MusicQueue:
         return len(self._queue)
     
     def __getitem__(self, index):
-        return self._queue[index]
+        if 0 <= index < len(self._queue):
+            return self._queue[index]
+        return None
 
 class MusicBot(commands.Cog):
     def __init__(self, bot):
@@ -133,10 +147,10 @@ class MusicBot(commands.Cog):
             self.queues[guild_id] = MusicQueue()
         return self.queues[guild_id]
     
-    async def play_next(self, ctx):
-        guild_id = ctx.guild.id
+    async def play_next(self, interaction):
+        guild_id = interaction.guild.id
         queue = self.get_queue(guild_id)
-        voice_client = ctx.guild.voice_client
+        voice_client = interaction.guild.voice_client
         
         if not voice_client:
             return
@@ -156,7 +170,7 @@ class MusicBot(commands.Cog):
                     if error:
                         print(f'Playback error: {error}')
                     # Schedule next song
-                    asyncio.run_coroutine_threadsafe(self.play_next(ctx), self.bot.loop)
+                    asyncio.run_coroutine_threadsafe(self.play_next(interaction), self.bot.loop)
                 
                 voice_client.play(next_song.source, after=after_playing)
                 
@@ -165,33 +179,35 @@ class MusicBot(commands.Cog):
                     description=f"**{next_song.title}**",
                     color=0x00ff00
                 )
-                embed.add_field(name="Uploader", value=next_song.uploader or "Unknown", inline=True)
+                embed.add_field(name="Uploader", value=next_song.uploader, inline=True)
+                
                 if next_song.duration:
                     minutes = next_song.duration // 60
                     seconds = next_song.duration % 60
                     embed.add_field(name="Duration", value=f"{minutes}:{seconds:02d}", inline=True)
+                
                 if next_song.thumbnail:
                     embed.set_thumbnail(url=next_song.thumbnail)
                 
                 asyncio.run_coroutine_threadsafe(
-                    ctx.send(embed=embed), 
+                    interaction.followup.send(embed=embed),
                     self.bot.loop
                 )
                 
             except Exception as e:
                 print(f"Error playing song: {e}")
                 asyncio.run_coroutine_threadsafe(
-                    ctx.send(f"Error playing song: {e}"),
+                    interaction.followup.send(f"❌ Error playing song: {e}"),
                     self.bot.loop
                 )
         elif self.autoplay_enabled and queue.history:
-            await self.autoplay_next(ctx)
+            await self.autoplay_next(interaction)
         else:
-            await ctx.send("🎶 Queue finished! Add more songs with `/play`")
+            await interaction.followup.send("🎶 Queue finished! Add more songs with `/play`")
     
-    async def autoplay_next(self, ctx):
+    async def autoplay_next(self, interaction):
         try:
-            queue = self.get_queue(ctx.guild.id)
+            queue = self.get_queue(interaction.guild.id)
             if not queue.history:
                 return
             
@@ -210,7 +226,6 @@ class MusicBot(commands.Cog):
             search_data = await asyncio.get_event_loop().run_in_executor(None, search_related)
             
             if 'entries' in search_data and search_data['entries']:
-                # Get first available related song
                 related_song = search_data['entries'][0]
                 if related_song:
                     song = await MusicSource.from_url(related_song['url'])
@@ -221,11 +236,11 @@ class MusicBot(commands.Cog):
                         description=f"Added **{song.title}** to queue",
                         color=0x9370DB
                     )
-                    await ctx.send(embed=embed)
+                    await interaction.followup.send(embed=embed)
                     
-                    voice_client = ctx.guild.voice_client
+                    voice_client = interaction.guild.voice_client
                     if voice_client and not voice_client.is_playing():
-                        await self.play_next(ctx)
+                        await self.play_next(interaction)
                         
         except Exception as e:
             print(f"Autoplay error: {e}")
@@ -248,9 +263,6 @@ class MusicBot(commands.Cog):
             await interaction.guild.voice_client.move_to(voice_channel)
         
         try:
-            # Create a context for the interaction
-            ctx = await self.bot.get_context(interaction)
-            
             # Get the song
             song = await MusicSource.from_url(query)
             
@@ -261,10 +273,15 @@ class MusicBot(commands.Cog):
             voice_client = interaction.guild.voice_client
             
             if not voice_client.is_playing():
-                await self.play_next(ctx)
-                await interaction.followup.send(f"🎶 Now playing: **{song.title}**")
+                await self.play_next(interaction)
             else:
-                await interaction.followup.send(f"✅ Added to queue: **{song.title}** (Position #{len(queue)})")
+                embed = discord.Embed(
+                    title="✅ Added to Queue",
+                    description=f"**{song.title}**",
+                    color=0x00ff00
+                )
+                embed.add_field(name="Position", value=f"#{len(queue)}", inline=True)
+                await interaction.followup.send(embed=embed)
                 
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {str(e)}")
@@ -304,7 +321,12 @@ class MusicBot(commands.Cog):
         # Show next 10 songs
         queue_text = ""
         for i, song in enumerate(queue[:10], 1):
-            queue_text += f"`{i}.` {song.title}\n"
+            duration = ""
+            if song.duration:
+                min = song.duration // 60
+                sec = song.duration % 60
+                duration = f" ({min}:{sec:02d})"
+            queue_text += f"`{i}.` {song.title}{duration}\n"
         
         if len(queue) > 10:
             queue_text += f"\n...and {len(queue) - 10} more songs"
@@ -356,6 +378,34 @@ class MusicBot(commands.Cog):
         status = "enabled" if self.autoplay_enabled else "disabled"
         await interaction.response.send_message(f"🔮 Autoplay {status}!")
 
+    @app_commands.command(name="nowplaying", description="Show current song")
+    async def nowplaying(self, interaction: discord.Interaction):
+        voice_client = interaction.guild.voice_client
+        queue = self.get_queue(interaction.guild.id)
+        
+        if not voice_client or not voice_client.is_playing() or not queue.history:
+            await interaction.response.send_message("❌ No music is playing!")
+            return
+        
+        current_song = queue.history[-1]
+        
+        embed = discord.Embed(
+            title="🎵 Now Playing",
+            description=f"**{current_song.title}**",
+            color=0x00ff00
+        )
+        embed.add_field(name="Uploader", value=current_song.uploader, inline=True)
+        
+        if current_song.duration:
+            minutes = current_song.duration // 60
+            seconds = current_song.duration % 60
+            embed.add_field(name="Duration", value=f"{minutes}:{seconds:02d}", inline=True)
+        
+        if current_song.thumbnail:
+            embed.set_thumbnail(url=current_song.thumbnail)
+        
+        await interaction.response.send_message(embed=embed)
+
 class Bot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -375,24 +425,33 @@ class Bot(commands.Bot):
         print(f'✅ Logged in as {self.user.name}')
         print(f'📍 Connected to {len(self.guilds)} guild(s)')
         print('🎵 Music Bot is ready!')
+        print('Available commands: /play, /skip, /stop, /pause, /resume, /queue, /disconnect, /autoplay, /nowplaying')
 
-def run_flask():
-    app.run(host='0.0.0.0', port=8080, debug=False)
-
-if __name__ == "__main__":
-    # Start Flask keep-alive
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
+def main():
+    # Start Flask keep-alive if available
+    try:
+        flask_thread = threading.Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+        print("🌐 Flask keep-alive server started")
+    except:
+        print("⚠️  Running without Flask keep-alive")
     
+    # Get bot token
     token = os.getenv('DISCORD_BOT_TOKEN')
     if not token:
         print("❌ ERROR: DISCORD_BOT_TOKEN environment variable not set!")
         print("💡 Set it in Render.com environment variables")
-        exit(1)
+        sys.exit(1)
     
+    # Create and run bot
     bot = Bot()
     
     try:
         bot.run(token)
+    except discord.LoginFailure:
+        print("❌ Invalid bot token!")
     except Exception as e:
         print(f"❌ Bot error: {e}")
+
+if __name__ == "__main__":
+    main()

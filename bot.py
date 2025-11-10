@@ -26,14 +26,6 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "yt-dlp==2023.11.16"])
     import yt_dlp
 
-try:
-    import nacl
-    print("✅ PyNaCl imported successfully")
-except ImportError:
-    print("📦 Installing PyNaCl...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "PyNaCl==1.5.0"])
-    import nacl
-
 # Flask keep-alive for Render
 try:
     from flask import Flask
@@ -41,7 +33,7 @@ try:
     
     @app.route('/')
     def home():
-        return "🎵 Music Bot Online - Using PyNaCl/Opus"
+        return "🎵 Music Bot Online - Using Direct FFmpeg"
     
     @app.route('/health')
     def health():
@@ -53,7 +45,7 @@ try:
 except ImportError:
     print("❌ Flask not available")
 
-# YouTube DL configuration with optimized audio formats
+# YouTube DL configuration
 ytdl_format_options = {
     'format': 'bestaudio/best',
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
@@ -67,37 +59,13 @@ ytdl_format_options = {
     'default_search': 'auto',
 }
 
-# Optimized FFmpeg options for Opus
+# FFmpeg options for direct audio streaming
 ffmpeg_options = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -fflags +genpts',
-    'options': '-vn -acodec pcm_s16le -ar 48000 -ac 2 -f s16le'
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn'
 }
 
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
-
-class OpusAudioSource(discord.AudioSource):
-    def __init__(self, source, *, volume=0.5):
-        self.source = source
-        self.volume = volume
-    
-    def read(self):
-        data = self.source.read()
-        if data:
-            # Apply volume and return raw PCM data for Opus encoding
-            return self._apply_volume(data)
-        return b''
-    
-    def _apply_volume(self, data):
-        # Simple volume adjustment for PCM data
-        import array
-        audio_data = array.array('h', data)
-        for i in range(len(audio_data)):
-            audio_data[i] = int(audio_data[i] * self.volume)
-        return audio_data.tobytes()
-    
-    def cleanup(self):
-        if hasattr(self.source, 'cleanup'):
-            self.source.cleanup()
 
 class MusicTrack:
     def __init__(self, data, audio_url):
@@ -108,8 +76,6 @@ class MusicTrack:
         self.duration = data.get('duration', 0)
         self.thumbnail = data.get('thumbnail', '')
         self.uploader = data.get('uploader', 'Unknown')
-        self.views = data.get('view_count', 0)
-        self.likes = data.get('like_count', 0)
     
     @classmethod
     async def from_query(cls, query, *, loop=None):
@@ -124,7 +90,7 @@ class MusicTrack:
             if 'entries' in data:
                 data = data['entries'][0]
             
-            # Get the best audio URL
+            # Get the audio URL
             audio_url = data['url']
             
             return cls(data, audio_url)
@@ -133,27 +99,24 @@ class MusicTrack:
             raise e
     
     def create_audio_source(self, volume=0.5):
-        """Create an optimized audio source for Discord"""
+        """Create audio source using direct FFmpeg"""
         source = discord.FFmpegPCMAudio(
             self.audio_url,
             **ffmpeg_options
         )
         
-        # Use PyNaCl-powered Opus encoder
+        # Apply volume using discord.py's built-in transformer
         return discord.PCMVolumeTransformer(source, volume=volume)
 
-class AdvancedMusicQueue:
+class MusicQueue:
     def __init__(self):
         self._queue = deque()
-        self.history = deque(maxlen=20)
+        self.history = deque(maxlen=15)
         self.loop_mode = 0  # 0: off, 1: track, 2: queue
         self.now_playing = None
     
     def add(self, track):
         self._queue.append(track)
-    
-    def add_next(self, track):
-        self._queue.appendleft(track)
     
     def get_next(self):
         if not self._queue:
@@ -177,13 +140,7 @@ class AdvancedMusicQueue:
         self._queue.clear()
         self.now_playing = None
     
-    def remove(self, index):
-        if 0 <= index < len(self._queue):
-            return self._queue[index]
-        return None
-    
     def set_loop(self, mode):
-        """Set loop mode: 0=off, 1=track, 2=queue"""
         self.loop_mode = mode
     
     def __len__(self):
@@ -194,7 +151,7 @@ class AdvancedMusicQueue:
             return self._queue[index]
         return None
 
-class EnhancedMusicBot(commands.Cog):
+class MusicBot(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.queues = {}
@@ -203,11 +160,10 @@ class EnhancedMusicBot(commands.Cog):
     
     def get_queue(self, guild_id):
         if guild_id not in self.queues:
-            self.queues[guild_id] = AdvancedMusicQueue()
+            self.queues[guild_id] = MusicQueue()
         return self.queues[guild_id]
     
     async def ensure_voice(self, interaction):
-        """Ensure bot is in voice channel"""
         if not interaction.user.voice:
             await interaction.response.send_message("❌ You need to be in a voice channel!", ephemeral=True)
             return False
@@ -238,7 +194,6 @@ class EnhancedMusicBot(commands.Cog):
                 def after_playing(error):
                     if error:
                         print(f'Playback error: {error}')
-                    # Schedule next song
                     asyncio.run_coroutine_threadsafe(self.play_next(interaction), self.bot.loop)
                 
                 voice_client.play(audio_source, after=after_playing)
@@ -267,7 +222,6 @@ class EnhancedMusicBot(commands.Cog):
             await interaction.followup.send(embed=embed)
     
     def create_track_embed(self, track, title):
-        """Create a beautiful embed for track info"""
         embed = discord.Embed(
             title=title,
             description=f"**[{track.title}]({track.url})**",
@@ -280,9 +234,6 @@ class EnhancedMusicBot(commands.Cog):
             minutes = track.duration // 60
             seconds = track.duration % 60
             embed.add_field(name="Duration", value=f"{minutes}:{seconds:02d}", inline=True)
-        
-        if track.views:
-            embed.add_field(name="Views", value=f"{track.views:,}", inline=True)
         
         if track.thumbnail:
             embed.set_thumbnail(url=track.thumbnail)
@@ -314,7 +265,7 @@ class EnhancedMusicBot(commands.Cog):
             if 'entries' in search_data and search_data['entries']:
                 # Find a track that's not in recent history
                 recent_urls = {track.url for track in list(queue.history)[-5:]}
-                for related in search_data['entries'][:10]:
+                for related in search_data['entries'][:5]:
                     if related.get('url') not in recent_urls:
                         try:
                             new_track = await MusicTrack.from_query(related['url'])
@@ -406,12 +357,12 @@ class EnhancedMusicBot(commands.Cog):
         # Upcoming tracks
         if len(queue) > 0:
             queue_text = ""
-            for i, track in enumerate(queue[:10], 1):
+            for i, track in enumerate(queue[:8], 1):
                 duration = f" ({track.duration//60}:{track.duration%60:02d})" if track.duration else ""
                 queue_text += f"`{i}.` {track.title}{duration}\n"
             
-            if len(queue) > 10:
-                queue_text += f"\n...and {len(queue) - 10} more tracks"
+            if len(queue) > 8:
+                queue_text += f"\n...and {len(queue) - 8} more tracks"
             
             embed.add_field(name="Upcoming", value=queue_text, inline=False)
         
@@ -528,7 +479,7 @@ class Bot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
     
     async def setup_hook(self):
-        await self.add_cog(EnhancedMusicBot(self))
+        await self.add_cog(MusicBot(self))
         try:
             synced = await self.tree.sync()
             print(f"✅ Synced {len(synced)} command(s)")
@@ -538,8 +489,8 @@ class Bot(commands.Bot):
     async def on_ready(self):
         print(f'✅ Logged in as {self.user.name} ({self.user.id})')
         print(f'📍 Connected to {len(self.guilds)} guild(s)')
-        print('🎵 Enhanced Music Bot is ready!')
-        print('💎 Using PyNaCl/Opus for superior audio quality')
+        print('🎵 Music Bot is ready!')
+        print('🔊 Using direct FFmpeg audio streaming')
 
 def main():
     # Start Flask keep-alive if available

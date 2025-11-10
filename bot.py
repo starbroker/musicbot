@@ -1,10 +1,29 @@
-import discord
-from discord import app_commands
-from discord.ext import commands
-import yt_dlp
-import asyncio
 import os
+import asyncio
 from collections import deque
+
+# Try to import discord with fallback
+try:
+    import discord
+    from discord import app_commands
+    from discord.ext import commands
+except ImportError as e:
+    print(f"Discord import error: {e}")
+    # Install missing packages
+    import subprocess
+    import sys
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "discord.py==2.3.2"])
+    import discord
+    from discord import app_commands
+    from discord.ext import commands
+
+try:
+    import yt_dlp
+except ImportError:
+    import subprocess
+    import sys
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "yt-dlp==2023.11.16"])
+    import yt_dlp
 
 # Configure yt-dlp options
 ytdl_format_options = {
@@ -72,11 +91,6 @@ class MusicQueue:
     def clear(self):
         self._queue.clear()
     
-    def remove(self, index):
-        if 0 <= index < len(self._queue):
-            return self._queue.remove(self._queue[index])
-        raise IndexError("Queue index out of range")
-    
     def __len__(self):
         return len(self._queue)
     
@@ -112,7 +126,12 @@ class MusicBot(commands.Cog):
         
         if next_song:
             try:
-                voice_client.play(next_song, after=lambda e: asyncio.run_coroutine_threadsafe(self.play_next(interaction), self.bot.loop))
+                def after_play(error):
+                    if error:
+                        print(f'Player error: {error}')
+                    asyncio.run_coroutine_threadsafe(self.play_next(interaction), self.bot.loop)
+                
+                voice_client.play(next_song, after=after_play)
                 
                 embed = discord.Embed(
                     title="🎵 Now Playing",
@@ -396,17 +415,20 @@ class Bot(commands.Bot):
     
     async def setup_hook(self):
         await self.add_cog(MusicBot(self))
-        await self.tree.sync()
-        print(f"Slash commands synced for {self.user}")
+        try:
+            await self.tree.sync()
+            print("Slash commands synced successfully!")
+        except Exception as e:
+            print(f"Error syncing commands: {e}")
     
     async def on_ready(self):
         print(f'{self.user} has logged in!')
         print(f'Bot is in {len(self.guilds)} guilds')
         print('Bot is ready to play music!')
 
-# Keep-alive for Render (important!)
+# Simple keep-alive for Render
 from flask import Flask
-app = Flask(__name__)
+app = Flask('')
 
 @app.route('/')
 def home():
@@ -417,6 +439,7 @@ def run_flask():
 
 if __name__ == "__main__":
     import threading
+    
     # Start Flask server in a separate thread for keep-alive
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
@@ -428,4 +451,7 @@ if __name__ == "__main__":
         exit(1)
     
     bot = Bot()
-    bot.run(token)
+    try:
+        bot.run(token)
+    except Exception as e:
+        print(f"Bot run error: {e}")

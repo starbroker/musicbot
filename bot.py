@@ -26,14 +26,14 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "yt-dlp==2023.11.16"])
     import yt_dlp
 
-# Flask keep-alive for Render
+# Simple Flask keep-alive
 try:
     from flask import Flask
     app = Flask(__name__)
     
     @app.route('/')
     def home():
-        return "🎵 Music Bot Online - Using Direct FFmpeg"
+        return "🎵 Music Bot Online"
     
     @app.route('/health')
     def health():
@@ -43,7 +43,8 @@ try:
         app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
         
 except ImportError:
-    print("❌ Flask not available")
+    def run_flask():
+        pass  # No Flask available
 
 # YouTube DL configuration
 ytdl_format_options = {
@@ -59,7 +60,6 @@ ytdl_format_options = {
     'default_search': 'auto',
 }
 
-# FFmpeg options for direct audio streaming
 ffmpeg_options = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn'
@@ -84,35 +84,26 @@ class MusicTrack:
         def extract_info():
             return ytdl.extract_info(query, download=False)
         
-        try:
-            data = await loop.run_in_executor(None, extract_info)
-            
-            if 'entries' in data:
-                data = data['entries'][0]
-            
-            # Get the audio URL
-            audio_url = data['url']
-            
-            return cls(data, audio_url)
-        except Exception as e:
-            print(f"Error creating music track: {e}")
-            raise e
+        data = await loop.run_in_executor(None, extract_info)
+        
+        if 'entries' in data:
+            data = data['entries'][0]
+        
+        audio_url = data['url']
+        return cls(data, audio_url)
     
     def create_audio_source(self, volume=0.5):
-        """Create audio source using direct FFmpeg"""
         source = discord.FFmpegPCMAudio(
             self.audio_url,
             **ffmpeg_options
         )
-        
-        # Apply volume using discord.py's built-in transformer
         return discord.PCMVolumeTransformer(source, volume=volume)
 
 class MusicQueue:
     def __init__(self):
         self._queue = deque()
-        self.history = deque(maxlen=15)
-        self.loop_mode = 0  # 0: off, 1: track, 2: queue
+        self.history = deque(maxlen=10)
+        self.loop_mode = 0
         self.now_playing = None
     
     def add(self, track):
@@ -124,7 +115,6 @@ class MusicQueue:
             
         track = self._queue.popleft()
         
-        # Handle loop modes
         if self.loop_mode == 1 and self.now_playing:
             self._queue.appendleft(track)
             return self.now_playing
@@ -165,7 +155,7 @@ class MusicBot(commands.Cog):
     
     async def ensure_voice(self, interaction):
         if not interaction.user.voice:
-            await interaction.response.send_message("❌ You need to be in a voice channel!", ephemeral=True)
+            await interaction.response.send_message("❌ Join a voice channel first!", ephemeral=True)
             return False
         
         voice_client = interaction.guild.voice_client
@@ -198,49 +188,29 @@ class MusicBot(commands.Cog):
                 
                 voice_client.play(audio_source, after=after_playing)
                 
-                # Send now playing embed
-                embed = self.create_track_embed(next_track, "🎵 Now Playing")
-                asyncio.run_coroutine_threadsafe(
-                    interaction.followup.send(embed=embed),
-                    self.bot.loop
+                embed = discord.Embed(
+                    title="🎵 Now Playing",
+                    description=f"**{next_track.title}**",
+                    color=0x00ff00
                 )
+                embed.add_field(name="Uploader", value=next_track.uploader, inline=True)
+                
+                if next_track.duration:
+                    minutes = next_track.duration // 60
+                    seconds = next_track.duration % 60
+                    embed.add_field(name="Duration", value=f"{minutes}:{seconds:02d}", inline=True)
+                
+                if next_track.thumbnail:
+                    embed.set_thumbnail(url=next_track.thumbnail)
+                
+                await interaction.followup.send(embed=embed)
                 
             except Exception as e:
-                print(f"Error playing track: {e}")
-                asyncio.run_coroutine_threadsafe(
-                    interaction.followup.send(f"❌ Error playing track: {e}"),
-                    self.bot.loop
-                )
+                await interaction.followup.send(f"❌ Error playing: {e}")
         elif self.autoplay_enabled and queue.history:
             await self.autoplay_next(interaction)
         else:
-            embed = discord.Embed(
-                title="🎶 Queue Finished",
-                description="The queue has ended. Add more songs with `/play`",
-                color=0x95a5a6
-            )
-            await interaction.followup.send(embed=embed)
-    
-    def create_track_embed(self, track, title):
-        embed = discord.Embed(
-            title=title,
-            description=f"**[{track.title}]({track.url})**",
-            color=0x1abc9c
-        )
-        
-        embed.add_field(name="Uploader", value=track.uploader, inline=True)
-        
-        if track.duration:
-            minutes = track.duration // 60
-            seconds = track.duration % 60
-            embed.add_field(name="Duration", value=f"{minutes}:{seconds:02d}", inline=True)
-        
-        if track.thumbnail:
-            embed.set_thumbnail(url=track.thumbnail)
-        
-        embed.set_footer(text=f"Volume: {int(self.default_volume * 100)}% | Autoplay: {'On' if self.autoplay_enabled else 'Off'}")
-        
-        return embed
+            await interaction.followup.send("🎶 Queue finished! Use `/play` to add more songs")
     
     async def autoplay_next(self, interaction):
         try:
@@ -250,7 +220,6 @@ class MusicBot(commands.Cog):
             
             last_track = queue.history[-1]
             
-            # Search for related tracks
             ytdl_search = yt_dlp.YoutubeDL({
                 **ytdl_format_options,
                 'extract_flat': True,
@@ -263,34 +232,24 @@ class MusicBot(commands.Cog):
             search_data = await asyncio.get_event_loop().run_in_executor(None, search_related)
             
             if 'entries' in search_data and search_data['entries']:
-                # Find a track that's not in recent history
-                recent_urls = {track.url for track in list(queue.history)[-5:]}
-                for related in search_data['entries'][:5]:
+                recent_urls = {track.url for track in list(queue.history)[-3:]}
+                for related in search_data['entries'][:3]:
                     if related.get('url') not in recent_urls:
-                        try:
-                            new_track = await MusicTrack.from_query(related['url'])
-                            queue.add(new_track)
-                            
-                            embed = discord.Embed(
-                                title="🔮 Autoplay",
-                                description=f"Added **{new_track.title}** to queue",
-                                color=0x9b59b6
-                            )
-                            await interaction.followup.send(embed=embed)
-                            
-                            # Start playing if not already
-                            voice_client = interaction.guild.voice_client
-                            if voice_client and not voice_client.is_playing():
-                                await self.play_next(interaction)
-                            break
-                        except Exception:
-                            continue
+                        new_track = await MusicTrack.from_query(related['url'])
+                        queue.add(new_track)
+                        
+                        await interaction.followup.send(f"🔮 Autoplay added: **{new_track.title}**")
+                        
+                        voice_client = interaction.guild.voice_client
+                        if voice_client and not voice_client.is_playing():
+                            await self.play_next(interaction)
+                        break
                         
         except Exception as e:
             print(f"Autoplay error: {e}")
 
     @app_commands.command(name="play", description="Play a song from YouTube")
-    @app_commands.describe(query="Song name, artist, or YouTube URL")
+    @app_commands.describe(query="Song name or YouTube URL")
     async def play(self, interaction: discord.Interaction, query: str):
         if not await self.ensure_voice(interaction):
             return
@@ -307,23 +266,21 @@ class MusicBot(commands.Cog):
             if not voice_client.is_playing():
                 await self.play_next(interaction)
             else:
-                embed = self.create_track_embed(track, "✅ Added to Queue")
-                embed.add_field(name="Position", value=f"#{len(queue)}", inline=True)
-                await interaction.followup.send(embed=embed)
+                await interaction.followup.send(f"✅ Added to queue: **{track.title}** (#{len(queue)})")
                 
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {str(e)}")
 
-    @app_commands.command(name="skip", description="Skip the current song")
+    @app_commands.command(name="skip", description="Skip current song")
     async def skip(self, interaction: discord.Interaction):
         voice_client = interaction.guild.voice_client
         
         if not voice_client or not voice_client.is_playing():
-            await interaction.response.send_message("❌ No music is playing!", ephemeral=True)
+            await interaction.response.send_message("❌ No music playing!", ephemeral=True)
             return
         
         voice_client.stop()
-        await interaction.response.send_message("⏭️ Skipped to next track!")
+        await interaction.response.send_message("⏭️ Skipped!")
 
     @app_commands.command(name="stop", description="Stop music and clear queue")
     async def stop(self, interaction: discord.Interaction):
@@ -334,19 +291,18 @@ class MusicBot(commands.Cog):
             voice_client.stop()
         queue.clear()
         
-        await interaction.response.send_message("🛑 Stopped playback and cleared queue!")
+        await interaction.response.send_message("🛑 Stopped and cleared queue!")
 
-    @app_commands.command(name="queue", description="Show current music queue")
+    @app_commands.command(name="queue", description="Show current queue")
     async def show_queue(self, interaction: discord.Interaction):
         queue = self.get_queue(interaction.guild.id)
         
-        if len(queue) == 0 and not queue.now_playing:
+        if len(queue) == 0:
             await interaction.response.send_message("📭 Queue is empty!", ephemeral=True)
             return
         
         embed = discord.Embed(title="🎵 Music Queue", color=0x3498db)
         
-        # Current track
         if queue.now_playing:
             embed.add_field(
                 name="Now Playing",
@@ -354,25 +310,16 @@ class MusicBot(commands.Cog):
                 inline=False
             )
         
-        # Upcoming tracks
         if len(queue) > 0:
             queue_text = ""
-            for i, track in enumerate(queue[:8], 1):
+            for i, track in enumerate(queue[:5], 1):
                 duration = f" ({track.duration//60}:{track.duration%60:02d})" if track.duration else ""
                 queue_text += f"`{i}.` {track.title}{duration}\n"
             
-            if len(queue) > 8:
-                queue_text += f"\n...and {len(queue) - 8} more tracks"
+            if len(queue) > 5:
+                queue_text += f"\n...and {len(queue) - 5} more"
             
             embed.add_field(name="Upcoming", value=queue_text, inline=False)
-        
-        # Queue info
-        loop_modes = ["Off", "Track", "Queue"]
-        embed.add_field(
-            name="Queue Info",
-            value=f"• Tracks: {len(queue)}\n• Loop: {loop_modes[queue.loop_mode]}\n• Autoplay: {'On' if self.autoplay_enabled else 'Off'}",
-            inline=True
-        )
         
         await interaction.response.send_message(embed=embed)
 
@@ -381,33 +328,32 @@ class MusicBot(commands.Cog):
         voice_client = interaction.guild.voice_client
         
         if not voice_client or not voice_client.is_playing():
-            await interaction.response.send_message("❌ No music is playing!", ephemeral=True)
+            await interaction.response.send_message("❌ No music playing!", ephemeral=True)
             return
         
         voice_client.pause()
-        await interaction.response.send_message("⏸️ Playback paused!")
+        await interaction.response.send_message("⏸️ Paused!")
 
     @app_commands.command(name="resume", description="Resume paused song")
     async def resume(self, interaction: discord.Interaction):
         voice_client = interaction.guild.voice_client
         
         if not voice_client or not voice_client.is_paused():
-            await interaction.response.send_message("❌ No music is paused!", ephemeral=True)
+            await interaction.response.send_message("❌ No music paused!", ephemeral=True)
             return
         
         voice_client.resume()
-        await interaction.response.send_message("▶️ Playback resumed!")
+        await interaction.response.send_message("▶️ Resumed!")
 
-    @app_commands.command(name="volume", description="Adjust bot volume (1-100)")
+    @app_commands.command(name="volume", description="Adjust volume (1-100)")
     @app_commands.describe(level="Volume level from 1 to 100")
     async def volume(self, interaction: discord.Interaction, level: int):
         if not 1 <= level <= 100:
-            await interaction.response.send_message("❌ Volume must be between 1 and 100!", ephemeral=True)
+            await interaction.response.send_message("❌ Volume must be 1-100!", ephemeral=True)
             return
         
         self.default_volume = level / 100
         
-        # Adjust current playback volume if any
         voice_client = interaction.guild.voice_client
         if voice_client and voice_client.is_playing() and hasattr(voice_client.source, 'volume'):
             voice_client.source.volume = self.default_volume
@@ -415,7 +361,7 @@ class MusicBot(commands.Cog):
         await interaction.response.send_message(f"🔊 Volume set to {level}%")
 
     @app_commands.command(name="loop", description="Set loop mode")
-    @app_commands.describe(mode="Loop mode: off, track, or queue")
+    @app_commands.describe(mode="Loop mode")
     @app_commands.choices(mode=[
         app_commands.Choice(name="off", value="off"),
         app_commands.Choice(name="track", value="track"),
@@ -423,51 +369,49 @@ class MusicBot(commands.Cog):
     ])
     async def loop(self, interaction: discord.Interaction, mode: str):
         queue = self.get_queue(interaction.guild.id)
-        
         mode_map = {"off": 0, "track": 1, "queue": 2}
         queue.set_loop(mode_map[mode])
-        
-        mode_names = {"off": "Off", "track": "Track", "queue": "Queue"}
-        await interaction.response.send_message(f"🔁 Loop mode set to: **{mode_names[mode]}**")
+        await interaction.response.send_message(f"🔁 Loop: **{mode}**")
 
-    @app_commands.command(name="autoplay", description="Toggle autoplay feature")
+    @app_commands.command(name="autoplay", description="Toggle autoplay")
     async def autoplay_cmd(self, interaction: discord.Interaction):
         self.autoplay_enabled = not self.autoplay_enabled
         status = "enabled" if self.autoplay_enabled else "disabled"
         await interaction.response.send_message(f"🔮 Autoplay **{status}**!")
 
-    @app_commands.command(name="disconnect", description="Disconnect bot from voice")
+    @app_commands.command(name="disconnect", description="Disconnect bot")
     async def disconnect(self, interaction: discord.Interaction):
         voice_client = interaction.guild.voice_client
         
         if not voice_client:
-            await interaction.response.send_message("❌ I'm not in a voice channel!", ephemeral=True)
+            await interaction.response.send_message("❌ Not in voice channel!", ephemeral=True)
             return
         
         queue = self.get_queue(interaction.guild.id)
         queue.clear()
-        
         await voice_client.disconnect()
-        await interaction.response.send_message("👋 Disconnected from voice channel!")
+        await interaction.response.send_message("👋 Disconnected!")
 
-    @app_commands.command(name="nowplaying", description="Show currently playing song")
+    @app_commands.command(name="nowplaying", description="Show current song")
     async def nowplaying(self, interaction: discord.Interaction):
         queue = self.get_queue(interaction.guild.id)
         voice_client = interaction.guild.voice_client
         
         if not queue.now_playing or not voice_client or not voice_client.is_playing():
-            await interaction.response.send_message("❌ No music is playing!", ephemeral=True)
+            await interaction.response.send_message("❌ No music playing!", ephemeral=True)
             return
         
-        embed = self.create_track_embed(queue.now_playing, "🎵 Now Playing")
+        embed = discord.Embed(
+            title="🎵 Now Playing",
+            description=f"**{queue.now_playing.title}**",
+            color=0x00ff00
+        )
+        embed.add_field(name="Uploader", value=queue.now_playing.uploader, inline=True)
         
-        # Add playback status
-        if voice_client.is_paused():
-            status = "⏸️ Paused"
-        else:
-            status = "▶️ Playing"
-        
-        embed.add_field(name="Status", value=status, inline=True)
+        if queue.now_playing.duration:
+            minutes = queue.now_playing.duration // 60
+            seconds = queue.now_playing.duration % 60
+            embed.add_field(name="Duration", value=f"{minutes}:{seconds:02d}", inline=True)
         
         await interaction.response.send_message(embed=embed)
 
@@ -482,39 +426,35 @@ class Bot(commands.Bot):
         await self.add_cog(MusicBot(self))
         try:
             synced = await self.tree.sync()
-            print(f"✅ Synced {len(synced)} command(s)")
+            print(f"✅ Synced {len(synced)} commands")
         except Exception as e:
-            print(f"❌ Error syncing commands: {e}")
+            print(f"❌ Command sync error: {e}")
     
     async def on_ready(self):
-        print(f'✅ Logged in as {self.user.name} ({self.user.id})')
-        print(f'📍 Connected to {len(self.guilds)} guild(s)')
-        print('🎵 Music Bot is ready!')
-        print('🔊 Using direct FFmpeg audio streaming')
+        print(f'✅ Logged in as {self.user.name}')
+        print(f'📍 Connected to {len(self.guilds)} guilds')
+        print('🎵 Music Bot Ready!')
 
 def main():
-    # Start Flask keep-alive if available
+    # Start keep-alive server
     try:
         flask_thread = threading.Thread(target=run_flask, daemon=True)
         flask_thread.start()
-        print("🌐 Flask keep-alive server started on port 8080")
-    except Exception as e:
-        print(f"⚠️  Running without Flask: {e}")
+        print("🌐 Keep-alive server started")
+    except:
+        print("⚠️  No keep-alive server")
     
     # Get bot token
     token = os.getenv('DISCORD_BOT_TOKEN')
     if not token:
-        print("❌ ERROR: DISCORD_BOT_TOKEN environment variable not set!")
-        print("💡 Set it in Render.com environment variables")
+        print("❌ ERROR: No bot token found!")
+        print("💡 Set DISCORD_BOT_TOKEN environment variable")
         sys.exit(1)
     
-    # Create and run bot
+    # Run bot
     bot = Bot()
-    
     try:
         bot.run(token)
-    except discord.LoginFailure:
-        print("❌ Invalid bot token!")
     except Exception as e:
         print(f"❌ Bot error: {e}")
 

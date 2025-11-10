@@ -1,2 +1,6 @@
+# 1. supply the missing audioop
+audioop-lts>=0.2.1
+
+# 2. now discord.py voice will import
 discord.py[voice]==2.3.2
 yt-dlp==2023.11.16

@@ -1,6 +1,6 @@
-# bot.py  –  1-file Discord music bot (yt-dlp)  –  Render-ready
 import os, asyncio, discord
 from discord.ext import commands
+from discord import app_commands
 import yt_dlp as youtube_dl
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
@@ -9,18 +9,18 @@ if not TOKEN:
 
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+bot = commands.Bot(command_prefix="/", intents=intents)
 
 # ---------- yt-dlp ----------
-ytdl_opts = {
+ytdl_format = {
     "format": "bestaudio/best",
     "outtmpl": "%(id)s.%(ext)s",
     "quiet": True,
     "noplaylist": True,
-    "source_address": "0.0.0.0"
+    "source_address": "0.0.0.0",
 }
 ffmpeg_opts = {"options": "-vn"}
-ytdl = youtube_dl.YoutubeDL(ytdl_opts)
+ytdl = youtube_dl.YoutubeDL(ytdl_format)
 
 class YTDLSource(discord.PCMVolumeTransformer):
     def __init__(self, source, *, data, volume=0.5):
@@ -40,78 +40,90 @@ class YTDLSource(discord.PCMVolumeTransformer):
 # ---------- queue ----------
 queue = []
 
-def play_next(ctx):
+async def _play_next(inter: discord.Interaction):
     if queue:
-        next_url = queue.pop(0)
-        coro = _play_song(ctx, next_url)
-        fut = asyncio.run_coroutine_threadsafe(coro, bot.loop)
-        try:
-            fut.result()
-        except Exception as e:
-            print(f"play_next error: {e}")
-    else:
-        # nothing left – idle until user adds more
-        pass
-
-async def _play_song(ctx, url):
-    async with ctx.typing():
+        url = queue.pop(0)
         player = await YTDLSource.from_url(url, loop=bot.loop, stream=True)
-        ctx.voice_client.play(player, after=lambda _: play_next(ctx))
-    await ctx.send(f"▶️ Now playing: **{player.title}**")
-
-# ---------- commands ----------
-@bot.command(name="join", aliases=["j"])
-async def join(ctx):
-    if ctx.author.voice:
-        await ctx.author.voice.channel.connect()
+        inter.guild.voice_client.play(
+            player,
+            after=lambda _: bot.loop.create_task(_play_next(inter))
+        )
+        await inter.followup.send(f"▶️ Now playing: **{player.title}**")
     else:
-        await ctx.send("You're not in a voice channel.")
+        await inter.followup.send("⏹️ Queue finished.")
 
-@bot.command(name="leave", aliases=["l"])
-async def leave(ctx):
-    if ctx.voice_client:
+# ---------- sync tree ----------
+@bot.event
+async def on_ready():
+    await bot.tree.sync()
+    print(f"{bot.user} connected & tree synced")
+
+# ---------- slash commands ----------
+@bot.tree.command(name="join", description="Join your voice channel")
+async def join(inter: discord.Interaction):
+    if not inter.user.voice:
+        return await inter.response.send_message("You are not in a voice channel.", ephemeral=True)
+    await inter.user.voice.channel.connect()
+    await inter.response.send_message("👋 Joined.")
+
+@bot.tree.command(name="leave", description="Leave voice and clear queue")
+async def leave(inter: discord.Interaction):
+    if inter.guild.voice_client:
         queue.clear()
-        await ctx.voice_client.disconnect()
+        await inter.guild.voice_client.disconnect()
+        await inter.response.send_message("👋 Left.")
     else:
-        await ctx.send("Not in a voice channel.")
+        await inter.response.send_message("Not in a voice channel.", ephemeral=True)
 
-@bot.command(name="play", aliases=["p"])
-async def play(ctx, *, url):
-    if not ctx.voice_client:
-        await ctx.invoke(join)
-    queue.append(url)
-    if not ctx.voice_client.is_playing():
-        play_next(ctx)
+@bot.tree.command(name="play", description="Add a song/keyword to the queue and start playing")
+async def play(inter: discord.Interaction, query: str):
+    await inter.response.defer()
+    if not inter.guild.voice_client:
+        if inter.user.voice:
+            await inter.user.voice.channel.connect()
+        else:
+            return await inter.followup.send("Join a voice channel first.", ephemeral=True)
+
+    queue.append(query)
+    if not inter.guild.voice_client.is_playing():
+        await _play_next(inter)
     else:
-        await ctx.send("➕ Added to queue.")
+        await inter.followup.send("➕ Added to queue.")
 
-@bot.command(name="skip", aliases=["s"])
-async def skip(ctx):
-    if ctx.voice_client and ctx.voice_client.is_playing():
-        ctx.voice_client.stop()  # triggers after= play_next → next song
-        await ctx.send("⏭️ Skipped.")
+@bot.tree.command(name="skip", description="Skip current track")
+async def skip(inter: discord.Interaction):
+    vc = inter.guild.voice_client
+    if vc and vc.is_playing():
+        vc.stop()  # after= will auto-play next
+        await inter.response.send_message("⏭️ Skipped.")
     else:
-        await ctx.send("Nothing playing.")
+        await inter.response.send_message("Nothing playing.", ephemeral=True)
 
-@bot.command(name="pause")
-async def pause(ctx):
-    if ctx.voice_client and ctx.voice_client.is_playing():
-        ctx.voice_client.pause()
-        await ctx.send("⏸️ Paused.")
+@bot.tree.command(name="pause", description="Pause playback")
+async def pause(inter: discord.Interaction):
+    vc = inter.guild.voice_client
+    if vc and vc.is_playing():
+        vc.pause()
+        await inter.response.send_message("⏸️ Paused.")
+    else:
+        await inter.response.send_message("Nothing playing.", ephemeral=True)
 
-@bot.command(name="resume", aliases=["r"])
-async def resume(ctx):
-    if ctx.voice_client and ctx.voice_client.is_paused():
-        ctx.voice_client.resume()
-        await ctx.send("▶️ Resumed.")
+@bot.tree.command(name="resume", description="Resume playback")
+async def resume(inter: discord.Interaction):
+    vc = inter.guild.voice_client
+    if vc and vc.is_paused():
+        vc.resume()
+        await inter.response.send_message("▶️ Resumed.")
+    else:
+        await inter.response.send_message("Not paused.", ephemeral=True)
 
-@bot.command(name="queue", aliases=["q"])
-async def show_queue(ctx):
+@bot.tree.command(name="queue", description="Show current queue")
+async def show_queue(inter: discord.Interaction):
     if queue:
         lines = [f"{i+1}. {url}" for i, url in enumerate(queue)]
-        await ctx.send("**Queue:**\n" + "\n".join(lines))
+        await inter.response.send_message("**Queue:**\n" + "\n".join(lines))
     else:
-        await ctx.send("Queue is empty.")
+        await inter.response.send_message("Queue is empty.", ephemeral=True)
 
 # ---------- run ----------
 bot.run(TOKEN)
